@@ -64,11 +64,7 @@ There is also a dev build: `boot build-dev`, and a file watcher that rebuilds on
 
 ### NPM Dependencies
 
-Node package dependencies can be managed with `boot` if they are in the CLJSJS repository. If not, use the `package.json` in the root folder to manage them.
-
-## Usage
-
-FIXME
+Node package dependencies can be managed with `boot` if they are in the CLJSJS repository. If not, use the `package.json` in the root folder to manage them. The modules are copied to the `target` directory as part of the build process.
 
 ## License
 
