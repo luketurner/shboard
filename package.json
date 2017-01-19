@@ -1,6 +1,6 @@
 {
   "name": "shboard",
-  "version": "1.0.0-beta1",
+  "version": "1.0.0-beta2",
   "description": "Ops dashboard in your terminal",
   "main": "target/main.js",
   "bin": {
