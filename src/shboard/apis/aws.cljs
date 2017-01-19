@@ -11,10 +11,11 @@
  [region]
  (set! (.-region (.-config js-AWS)) region))
 
-; (defn- find-tag
-;   "Given an AWS taglist and a key, returns the value for the tag with that key, if any."
-;   [taglist key]
-;   (get (first (filter #(= (get % "Key") key) taglist)) "Value" "No Name"))
+(defn set-profile!
+ [profile]
+ (set! (.-credentials (.-config js-AWS))
+       (new js-AWS.SharedIniFileCredentials
+            (clj->js {:profile profile}))))
 
 (defn- taglist->map
  "Converts an AWS-style taglist into a normal hash-map.

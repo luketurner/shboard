@@ -31,7 +31,7 @@
  [& raw-args]
  (go
   (let [{:keys [log-file config-file]
-         {:keys [region]} :aws
+         {:keys [region profile]} :aws
          {:keys [save-config save-api-keys run-tests debug]} :flags
          :as current-config} (<! (config/update-config! raw-args))
         {:keys [text error-code]} (config/get-cli-output raw-args)]
@@ -41,7 +41,7 @@
    (when text ; print any help/error text to STDOUT
     (println text)
     (exit error-code))
-   (when run-tests
+   (when run-tests ; TODO - This doesn't work yet.
     (println "Running test.spec suite (this may take some time)...")
     (check)
     (println "Done.")
@@ -72,6 +72,7 @@
      (println "End configuration."))
     (disable-print!))
    (aws/set-region! region)
+   (aws/set-profile! profile)
    (initialize-ui current-config))))
   
 
