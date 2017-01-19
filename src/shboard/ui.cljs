@@ -1,91 +1,95 @@
 (ns shboard.ui
-  (:require [shboard.blessed :as blesssed :refer [text add-children add-child layout sparkline box]]
-            [shboard.util :refer [assoc-opts]]
-            [shboard.state :as state]))
+ (:require [shboard.apis.blessed :as blessed :refer [text
+                                                     layout
+                                                     box]]
+           [shboard.apis.new-relic :as new-relic]
+           [shboard.apis.node.process :refer [exit]]
+           [shboard.apis.sparkline :refer [sparkline-from-seq]]
+           [shboard.apis.opn :refer [opn]]
+           [shboard.ui.dashboard :refer [dashboard-layout]]
+           [shboard.ui.header :refer [header-layout header-height]]
+           [shboard.ui.screen :refer [screen
+                                      create-screen!]]
+           [shboard.util :refer [merge-deep
+                                 in-range?
+                                 kw->str]]
+           [shboard.servers :as servers]
+           [shboard.config :refer [get-config-value]]
+           [shboard.colors :refer [string->color
+                                   get-style]]
+           [shboard.server-stats :as server-stats]
+           [shboard.scroll :as scroll]
+           [shboard.ui.state :refer [get-state-value
+                                     set-state-value!
+                                     add-render-watch]]
+           [cljs.nodejs :refer [require]]
+           [cljs.pprint :refer [cl-format]])
+ (:use [clojure.string :only [join]]))
 
-(def color-for-class {
-  :postgresql "#cb4b16" ;orange
-  :redis "#b58900" ;yellow
-  :elasticsearch "#d33682" ;magenta
-  :kibana "#6c71c4" ;violet
-  :haproxy "#839496" ;brblue
-  :vpn "#268bd2" ;blue
-  :build "#859900" ;green
-  :docker "#2aa198" ;cyan
-  :ranchermgmt "#93a1a1" ;brcyan
-  :none "fg"
-})
+; (defn start-render-loop!
+;  "Starts a loop that re-renders the app if a render is requested."
+;  []
+;  (let [maybe-render? #(when @render-requested?
+;                        (println "rendering...")
+;                        (reset! render-requested? false)
+;                        (.render @screen))]
+;   (js/setInterval maybe-render? 200)))
 
-(def abbrev-for-class {
-  :postgresql "PG"
-  :redis "RE"
-  :elasticsearch "ES"
-  :kibana "KI"
-  :haproxy "HA"
-  :vpn "VP"
-  :build "CI"
-  :docker "DO"
-  :ranchermgmt "RN"
-  :none "N/A"
-})
+; (def request-render!
+;  "Requests a re-render when next available."
+;  (_throttle #(.render @screen) 50))
 
-(def abbrev-for-subclass {
-  :master "M"
-  :slave "S"
-  :none ""
-})
 
-(def color-for-state {
-  :terminated "#dc322f" ;red
-  :shutting-down "#cb4b16" ;orange
-  :stopped "#cb4b16" ;orange
-  :stopping "#cb4b16" ;orange
-  :missing "#dc322f" ;red
-  :running "bg"
-})
+; root-layout depends on render, and render calls root-layout.
+; therefore, we declare layout early so it can be used in render.
+(declare root-layout)
 
-(defn server-row
-  "Returns an object representing the UI element for a server row in the dashboard"
-  ([row-index {{cpu-stats :cpu mem-stats :memory disk-stats :disk net-stats :net :defaults {cpu-stats [] mem-stats [] disk-stats [] net-stats []} } :stats
-     :keys [id name class subclass state launch-time private-ip public-ip]
-     :as opts}]
-    (let [abbrev (str (abbrev-for-class class) (abbrev-for-subclass subclass))
-          class-color (color-for-class class)
-          id-color (color-for-state state)
-          child-nodes
-            [(text abbrev :style {:bg class-color} :padding {:left 1 :right 1} :options {:width 5 :hoverText name})
-             (text id :style {:bg id-color} :padding {:left 1 :right 1} :options {:width 21})
-             (text private-ip :padding {:left 1 :right 1} :options {:width 17})
-             (text public-ip :padding {:left 1 :right 1} :options {:width 17}) 
-             (text "C" :padding {:left 2 :right 1}) (sparkline cpu-stats :options {:width 10})
-             (text "M" :padding {:left 2 :right 1}) (sparkline mem-stats :options {:width 10})
-             (text "D" :padding {:left 2 :right 1}) (sparkline disk-stats :options {:width 10})
-             (text "N" :padding {:left 2 :right 1}) (sparkline net-stats :options {:width 10})]]
-      (-> opts
-        (assoc :children child-nodes)
-        (assoc-in [:options :height] 1)
-        (assoc-in [:options :width] "100%")
-        (assoc-in [:options :top] row-index)
-        (assoc-in [:options :scrollable] true)
-        (layout)))))
+(defn render
+ "High-level function to re-reate and re-render the entire UI.
+  Should be called whenever UI state changes."
+ []
+ (let [screen    @screen
+       old-child (-> screen (.-children) (aget 0))
+       new-child (root-layout {:width  "100%"
+                               :height "100%"})]
+  (if (some? old-child) (.destroy old-child))
+  (blessed/add-child! screen new-child)
+  (.render screen)))
 
-()
+; (defn render-into
+;  "Sets the content of given element and re-renders to update the screen immediately.
+;   Because renders are throttled, this can be called repeatedly without causing lag...
+;   hopefully."
+;  [target-element new-content]
+;  (.setContent target-element new-content)
+;  (request-render!))
 
-(defn dashboard
-  "Returns a fully-described dashboard object"
-  ([opt & opts] (dashboard (assoc-opts opt opts)))
-  ([opts]
-    (let [servers (:servers @state/db)
-          num-servers (count servers)
-          scroll-dashboard (fn [offset]
-                            (swap! state/db update-in [:scroll :dashboard]
-                              #(min 0 (+ % offset))))
-          scroll-offset (get-in @state/db [:scroll :dashboard] 0)
-          dashboard-rows (map-indexed #(server-row (+ scroll-offset %1) %2) servers)
-          dashboard-box (-> opts 
-                            (assoc :children dashboard-rows)
-                            (assoc-in [:options :scrollable] true)
-                            (box))]
-        (.on dashboard-box "wheelup" #(scroll-dashboard 2))
-        (.on dashboard-box "wheeldown" #(scroll-dashboard -2))
-        dashboard-box)))
+(defn root-layout
+ "Returns a fully-described dashboard object"
+ [opts]
+ (let [header (header-layout {:style (get-style :inactive)})
+       content (dashboard-layout {:width "100%"
+                                  :top header-height
+                                  :style (get-style :active)})
+       root (layout (merge-deep {:children [header content]
+                                 :focused true
+                                 :width "100%"
+                                 :height "100%"}
+                                opts))]
+  (.focus content)
+  root))
+
+(defn initialize-ui
+ "Initializes new UI, wires up application state, and launches async data retrievers."
+ [{{:keys [no-metrics]} :flags}]
+ (add-render-watch :ui/render render)
+ (servers/add-update-watch :ui/render render)
+ (servers/add-insert-watch :server-stats/insert-server-watcher new-relic/update-server-ids!)
+ (add-watch new-relic/server-id-table :stats-poll 
+  (fn [_ _ o n]
+   (when (and (not= o n) 
+              (< 0 (count n)))
+    (server-stats/update-all-stats!))))
+ (servers/update-server-data!)
+ (create-screen!)
+ (render))

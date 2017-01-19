@@ -1,65 +1,78 @@
 (ns shboard.core
-  (:require [cljs.nodejs :as nodejs]
-            [cljs.tools.cli :refer [parse-opts]]
-            [shboard.blessed :as blessed]
-            [shboard.aws :as aws]
-            [shboard.new-relic :as new-relic]
-            [shboard.ui :as ui]
-            [shboard.state :as state]))
+ (:require [cljs.nodejs :as nodejs]
+           [shboard.apis.blessed :as blessed]
+           [shboard.apis.aws :as aws]
+           [shboard.apis.new-relic :as new-relic]
+           [shboard.apis.node.fs :refer [write-file mkdir]]
+           [shboard.apis.node.path :refer [dirname]]
+           [shboard.apis.node.process :refer [exit]]
+           [shboard.config :as config]
+           [shboard.ui :refer [initialize-ui]]
+           [shboard.util :refer [without-keys]]
+           [shboard.servers :as servers]
+           [shboard.server-stats :as server-stats]
+           [shboard.log :as log]
+           [clojure.string :as string]
+           [cljs.pprint :refer [pprint]]
+           [cljs.spec.test :refer [instrument check]]
+           [cljs.core.async :refer [<!]])
+ (:require-macros [cljs.core.async.macros :refer [go]]))
 
+; makes print and friends use console.log
 (nodejs/enable-util-print!)
 
-(defn env-var [key] (-> js/process (aget "env") (aget key)))
+(defn disable-print!
+ []
+ (let [void-print (fn [& args] nil)]
+  (set! *print-fn* void-print)
+  (set! *print-err-fn* void-print)))
 
-(defn exit
-  "Quits the program with given exit code"
-  [code]
-  (.exit js/process code))
-
-(def cli-options
-  [["-h" "--help" "Display this help message"]
-   [nil, "--debug", "Display debug messages"]
-   ["-N" "--new-relic-key KEY" "New Relic API key to use"
-    :default (env-var "NEW_RELIC_API_KEY")
-    :default-desc "NEW_RELIC_API_KEY"]
-   ["-P" "--aws-profile PROFILE" "AWS profile to use"
-    :default (env-var "AWS_PROFILE")
-    :default-desc "AWS_PROFILE"]])
-
-
-(defn initialize-dashbord
-  "Creates a dashboard screen, wires up applicatino state, and launches async data retrievers."
-  [{:keys [new-relic-key]}]
-  (let [screen (blessed/screen :title "shboard"
-                               :keymap [[["q" "escape" "C-c"] #(exit 0)]])
-        add-dashboard #(blessed/add-child screen (ui/dashboard :options {:width "100%" :height "100%"}))
-        render #(do (add-dashboard) (.render screen))
-        update-new-relic (fn [_ _ old new]
-                           (let [old-servers (:servers old)
-                                 new-servers (:servers new)]
-                             (if (not (= old-servers new-servers))
-                               (new-relic/fetch-server-ids! (map :private-dns-name new-servers)))))]
-    (println new-relic-key)
-    (println (swap! state/db assoc-in [:config :new-relic-api-key] new-relic-key))
-    (println (get-in @state/db [:config :new-relic-api-key]))
-    (add-watch state/db nil render)
-    (add-watch state/db nil update-new-relic)
-    (aws/fetch-server-data! state/db [:servers])
-    (render)))
-
-(defn -main [& args]
-  (let
-    [{{help?  :help
-       debug? :debug
-       :as options} :options
-      help-summary :summary}
-     (parse-opts args cli-options)]
-    (when debug?
-      (state/add-debug-watcher!)
-      (swap! state/db assoc :debug true))
-    (println "options" options)
-    (if help?
-      (println help-summary)
-      (initialize-dashbord options))))
+(defn -main
+ [& raw-args]
+ (go
+  (let [{:keys [log-file config-file]
+         {:keys [region]} :aws
+         {:keys [save-config save-api-keys run-tests debug]} :flags
+         :as current-config} (<! (config/update-config! raw-args))
+        {:keys [text error-code]} (config/get-cli-output raw-args)]
+   (when debug
+    ; enable runtime type-checking for specced functions
+    (instrument))
+   (when text ; print any help/error text to STDOUT
+    (println text)
+    (exit error-code))
+   (when run-tests
+    (println "Running test.spec suite (this may take some time)...")
+    (check)
+    (println "Done.")
+    (exit 0))
+   (when (or save-api-keys save-config) ; note -- save-api-keys implies save-config
+    (println "Writing configuration to" config-file)
+    (let [keys-to-filter (if save-api-keys
+                              [:flags :config-file]
+                              [:flags :config-file :api-keys])
+           config-string (with-out-str
+                          (pprint
+                           (without-keys keys-to-filter current-config)))
+           mkdir-err (<! (mkdir (dirname config-file)))
+           write-err (<! (write-file config-file config-string))]
+     (when (some? mkdir-err)
+      (println "Error creating folder for config:" mkdir-err)
+      (exit 1))
+     (when (some? write-err)
+      (println "Error writing config:" write-err)
+      (exit 1))
+     (exit 0)))
+   (if log-file
+    (do 
+     (<! (log/start-logging-to-file! log-file))
+     (println "// shboard diagnostic logs // ::" (.toISOString (new js/Date)))
+     (println "Current configuration (sans :api-keys):")
+     (pprint  (without-keys [:api-keys] current-config))
+     (println "End configuration."))
+    (disable-print!))
+   (aws/set-region! region)
+   (initialize-ui current-config))))
+  
 
 (set! *main-cli-fn* -main)
